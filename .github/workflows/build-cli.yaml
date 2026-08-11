@@ -34,11 +34,38 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - name: Build CLI image
-        uses: RadxaOS-SDK/rsdk/.github/actions/build@main
+      - name: Checkout rsdk
+        uses: actions/checkout@v6
         with:
-          product: radxa-dragon-q6a
-          suite: bookworm
-          edition: cli
-          artifacts: "true"
-          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          repository: RadxaOS-SDK/rsdk
+          submodules: recursive
+          path: .rsdk
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          image: tonistiigi/binfmt:latest
+
+      - name: Build CLI image
+        uses: devcontainers/ci@v0.3
+        with:
+          subFolder: .rsdk
+          push: never
+          runCmd: |
+            set -euo pipefail
+            src/bin/rsdk setup
+            src/bin/rsdk shell rsdk build --no-pkgs-json radxa-dragon-q6a bookworm cli
+
+      - name: Prepare artifact
+        run: |
+          cd .rsdk/out/radxa-dragon-q6a*
+          sudo chown -R $USER:$GROUPS .
+          xz -vT 0 *.img
+          ls -lh
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: radxa-dragon-q6a-cli-bookworm
+          path: .rsdk/out/radxa-dragon-q6a*/*.img.xz
+          compression-level: 0
