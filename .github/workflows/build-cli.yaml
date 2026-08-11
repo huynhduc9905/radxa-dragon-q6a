@@ -1,0 +1,44 @@
+name: Build minimal CLI image
+
+on:
+  workflow_dispatch:
+
+env:
+  GH_TOKEN: "${{ github.token }}"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner info
+        run: |
+          echo "=== CPU ==="
+          nproc
+          lscpu | grep -E "^(CPU|Model name|Architecture)"
+          echo "=== RAM ==="
+          free -h
+          echo "=== Disk ==="
+          df -h / | tail -1
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Build CLI image
+        uses: RadxaOS-SDK/rsdk/.github/actions/build@main
+        with:
+          product: radxa-dragon-q6a
+          suite: bookworm
+          edition: cli
+          artifacts: "true"
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
