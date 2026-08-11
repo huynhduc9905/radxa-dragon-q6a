@@ -35,11 +35,22 @@ jobs:
           swap-storage: true
 
       - name: Checkout rsdk
-        uses: actions/checkout@v6
-        with:
-          repository: RadxaOS-SDK/rsdk
-          submodules: recursive
-          path: .rsdk
+        run: |
+          git clone https://github.com/RadxaOS-SDK/rsdk.git .rsdk
+          cd .rsdk
+          # Try submodule init with retries, skip ubuntu keyring if unavailable
+          for i in 1 2 3; do
+            git submodule update --init --recursive --depth=1 && break
+            echo "Retry $i: submodule fetch failed, waiting 10s..."
+            sleep 10
+          done || {
+            echo "Some submodules failed. Trying individually..."
+            git submodule update --init --depth=1 externals/keyrings/debian || true
+            git submodule update --init --depth=1 externals/keyrings/radxa || true
+            git submodule update --init --depth=1 externals/keyrings/ubuntu || true
+            git submodule update --init --depth=1 externals/keyrings/vscodium || true
+            git submodule update --init --depth=1 externals/librtui || true
+          }
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
