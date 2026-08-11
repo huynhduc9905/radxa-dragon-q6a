@@ -34,23 +34,46 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - name: Checkout rsdk
+      - name: Checkout rsdk (skip unreachable launchpad submodule)
         run: |
-          git clone https://github.com/RadxaOS-SDK/rsdk.git .rsdk
+          set -euo pipefail
+
+          # Fail fast instead of hanging ~270s on dead remotes
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 30
+
+          git clone --depth=1 https://github.com/RadxaOS-SDK/rsdk.git .rsdk
           cd .rsdk
-          # Try submodule init with retries, skip ubuntu keyring if unavailable
-          for i in 1 2 3; do
-            git submodule update --init --recursive --depth=1 && break
-            echo "Retry $i: submodule fetch failed, waiting 10s..."
-            sleep 10
-          done || {
-            echo "Some submodules failed. Trying individually..."
-            git submodule update --init --depth=1 externals/keyrings/debian || true
-            git submodule update --init --depth=1 externals/keyrings/radxa || true
-            git submodule update --init --depth=1 externals/keyrings/ubuntu || true
-            git submodule update --init --depth=1 externals/keyrings/vscodium || true
-            git submodule update --init --depth=1 externals/librtui || true
-          }
+
+          # git.launchpad.net is frequently unreachable from CI.
+          # The Ubuntu keyring is only needed for Ubuntu suites; we build Debian.
+          git -c submodule."keyrings/ubuntu".update=none \
+              submodule update --init --recursive --depth=1
+
+      - name: Provide Ubuntu keyring without launchpad
+        run: |
+          set -euo pipefail
+          cd .rsdk
+
+          # rsdk-build's prepare_keyrings() runs:
+          #   cp -r externals/keyrings/ubuntu/keyrings/. <out>
+          # which hard-fails if the directory is absent, so create it.
+          mkdir -p externals/keyrings/ubuntu/keyrings
+
+          # Best effort: populate with the real keyring from the Ubuntu archive.
+          # An empty directory is still valid for Debian builds.
+          curl -fsSL --retry 3 --max-time 60 \
+            -o externals/keyrings/ubuntu/keyrings/ubuntu-archive-keyring.gpg \
+            http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg \
+            || echo "Ubuntu keyring download failed; continuing (not needed for Debian)"
+
+          echo "=== keyring inventory ==="
+          for d in debian/apt-trusted-asc radxa/keyrings ubuntu/keyrings; do
+            printf '%s: %s file(s)\n' "$d" "$(ls -A "externals/keyrings/$d" 2>/dev/null | wc -l)"
+          done
+
+          # Debian keyrings are mandatory for this build
+          test -n "$(ls -A externals/keyrings/debian/apt-trusted-asc)"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -69,8 +92,9 @@ jobs:
 
       - name: Prepare artifact
         run: |
+          set -euo pipefail
           cd .rsdk/out/radxa-dragon-q6a*
-          sudo chown -R $USER:$GROUPS .
+          sudo chown -R "$USER:$(id -gn)" .
           xz -vT 0 *.img
           ls -lh
 
