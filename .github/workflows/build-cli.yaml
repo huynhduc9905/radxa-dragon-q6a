@@ -5,6 +5,12 @@ on:
 
 env:
   GH_TOKEN: "${{ github.token }}"
+  # Dragon Q6A (QCS6490) vendor packages are only published for Ubuntu noble.
+  # https://radxa-repo.github.io/qcs6490-bookworm  -> 404
+  # https://radxa-repo.github.io/qcs6490-noble     -> 200
+  SUITE: noble
+  EDITION: cli
+  PRODUCT: radxa-dragon-q6a
 
 jobs:
   build:
@@ -45,8 +51,8 @@ jobs:
           git clone --depth=1 https://github.com/RadxaOS-SDK/rsdk.git .rsdk
           cd .rsdk
 
-          # git.launchpad.net is frequently unreachable from CI.
-          # The Ubuntu keyring is only needed for Ubuntu suites; we build Debian.
+          # git.launchpad.net (ubuntu-keyring submodule) is unreachable from CI.
+          # We restore the keyring from the Ubuntu archive in the next step.
           git -c submodule."keyrings/ubuntu".update=none \
               submodule update --init --recursive --depth=1
 
@@ -57,22 +63,28 @@ jobs:
 
           # rsdk-build's prepare_keyrings() runs:
           #   cp -r externals/keyrings/ubuntu/keyrings/. <out>
-          # which hard-fails if the directory is absent, so create it.
+          # which hard-fails if the directory is absent.
           mkdir -p externals/keyrings/ubuntu/keyrings
 
-          # Best effort: populate with the real keyring from the Ubuntu archive.
-          # An empty directory is still valid for Debian builds.
-          curl -fsSL --retry 3 --max-time 60 \
-            -o externals/keyrings/ubuntu/keyrings/ubuntu-archive-keyring.gpg \
-            http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg \
-            || echo "Ubuntu keyring download failed; continuing (not needed for Debian)"
+          # noble is an Ubuntu suite, so this keyring is required to verify the
+          # archive. prepare_keyrings() also seeds from /usr/share/keyrings/,
+          # and rsdk's devcontainer depends on the ubuntu-keyring package, so
+          # that acts as a second source if this download fails.
+          if curl -fsSL --retry 3 --max-time 60 \
+               -o externals/keyrings/ubuntu/keyrings/ubuntu-archive-keyring.gpg \
+               http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg
+          then
+            echo "Fetched ubuntu-archive-keyring.gpg from the Ubuntu archive"
+          else
+            echo "WARNING: download failed; relying on the container's ubuntu-keyring package"
+            rm -f externals/keyrings/ubuntu/keyrings/ubuntu-archive-keyring.gpg
+          fi
 
           echo "=== keyring inventory ==="
           for d in debian/apt-trusted-asc radxa/keyrings ubuntu/keyrings; do
             printf '%s: %s file(s)\n' "$d" "$(ls -A "externals/keyrings/$d" 2>/dev/null | wc -l)"
           done
 
-          # Debian keyrings are mandatory for this build
           test -n "$(ls -A externals/keyrings/debian/apt-trusted-asc)"
 
       - name: Set up QEMU
@@ -88,19 +100,28 @@ jobs:
           runCmd: |
             set -euo pipefail
             src/bin/rsdk setup
-            src/bin/rsdk shell rsdk build --no-pkgs-json radxa-dragon-q6a bookworm cli
+            # sector-size 512 is the SD card / eMMC layout (4096 is for UFS)
+            src/bin/rsdk shell rsdk build \
+              --sector-size 512 \
+              "${{ env.PRODUCT }}" "${{ env.SUITE }}" "${{ env.EDITION }}"
 
       - name: Prepare artifact
         run: |
           set -euo pipefail
-          cd .rsdk/out/radxa-dragon-q6a*
+          cd ".rsdk/out/${PRODUCT}_${SUITE}_${EDITION}"
           sudo chown -R "$USER:$(id -gn)" .
+          echo "=== raw image size ==="
+          ls -lh *.img
           xz -vT 0 *.img
-          ls -lh
+          echo "=== compressed ==="
+          ls -lh *.img.xz
+          sha256sum *.img.xz | tee SHA256SUMS
 
       - name: Upload image
         uses: actions/upload-artifact@v4
         with:
-          name: radxa-dragon-q6a-cli-bookworm
-          path: .rsdk/out/radxa-dragon-q6a*/*.img.xz
+          name: ${{ env.PRODUCT }}-${{ env.SUITE }}-${{ env.EDITION }}
+          path: |
+            .rsdk/out/${{ env.PRODUCT }}_${{ env.SUITE }}_${{ env.EDITION }}/*.img.xz
+            .rsdk/out/${{ env.PRODUCT }}_${{ env.SUITE }}_${{ env.EDITION }}/SHA256SUMS
           compression-level: 0
