@@ -105,6 +105,69 @@ jobs:
               --sector-size 512 \
               "${{ env.PRODUCT }}" "${{ env.SUITE }}" "${{ env.EDITION }}"
 
+      - name: Patch boot config for visible console
+        run: |
+          set -euo pipefail
+          OUT=".rsdk/out/${PRODUCT}_${SUITE}_${EDITION}"
+          IMG="$(find "$OUT" -maxdepth 1 -name '*.img' -print -quit)"
+          test -n "$IMG" || { echo "No .img found in $OUT"; exit 1; }
+          echo "Patching $IMG"
+
+          # The stock cmdline (from radxa-system-config-kernel-cmdline-ttymsm0)
+          # contains "quiet splash loglevel=4", which leaves HDMI blank on a CLI
+          # image because there is no display manager or plymouth splash to draw
+          # anything. Dropping it makes the boot log and login prompt visible.
+          LOOP="$(sudo losetup --find --show --partscan "$IMG")"
+          echo "Loop device: $LOOP"
+          # Give the kernel a moment to create the partition nodes
+          sudo partprobe "$LOOP" || true
+          for _ in $(seq 1 10); do
+            [ -e "${LOOP}p3" ] && break
+            sleep 1
+          done
+          lsblk -o NAME,SIZE,FSTYPE,LABEL "$LOOP"
+
+          # Locate partitions by label rather than index so this survives any
+          # future layout change (observed: p1=config, p2=efi, p3=rootfs)
+          EFI_PART=""; ROOT_PART=""
+          for p in "${LOOP}"p*; do
+            case "$(sudo blkid -s LABEL -o value "$p" 2>/dev/null || true)" in
+              efi)    EFI_PART="$p" ;;
+              rootfs) ROOT_PART="$p" ;;
+            esac
+          done
+          echo "EFI=$EFI_PART ROOT=$ROOT_PART"
+          test -n "$EFI_PART" && test -n "$ROOT_PART"
+
+          sudo mkdir -p /mnt/q6a-efi /mnt/q6a-root
+          sudo mount "$EFI_PART" /mnt/q6a-efi
+          sudo mount "$ROOT_PART" /mnt/q6a-root
+
+          # Boot entries (active now) and /etc/kernel/cmdline (survives the next
+          # kernel update, since kernel-install regenerates entries from it)
+          sudo sed -i 's/ quiet splash//; s/loglevel=4/loglevel=7/' \
+            /mnt/q6a-efi/loader/entries/*.conf \
+            /mnt/q6a-root/etc/kernel/cmdline
+
+          # 3s is easy to miss when you need to edit the cmdline with "e"
+          sudo sed -i 's/^timeout.*/timeout 10/' /mnt/q6a-efi/loader/loader.conf
+
+          echo "=== patched entry ==="
+          sudo grep '^options' /mnt/q6a-efi/loader/entries/*.conf
+          echo "=== loader.conf ==="
+          sudo cat /mnt/q6a-efi/loader/loader.conf
+
+          echo "=== verifying ==="
+          sudo grep -q ' quiet' /mnt/q6a-efi/loader/entries/*.conf && { echo "FAIL: quiet remains"; exit 1; }
+          sudo grep -q 'splash' /mnt/q6a-efi/loader/entries/*.conf && { echo "FAIL: splash remains"; exit 1; }
+          sudo grep -q 'root=UUID=' /mnt/q6a-efi/loader/entries/*.conf || { echo "FAIL: root= lost"; exit 1; }
+          sudo grep -q 'console=tty1' /mnt/q6a-efi/loader/entries/*.conf || { echo "FAIL: console=tty1 lost"; exit 1; }
+          sudo grep -q 'loglevel=7' /mnt/q6a-root/etc/kernel/cmdline || { echo "FAIL: cmdline not patched"; exit 1; }
+          echo "All boot config assertions passed"
+
+          sudo umount /mnt/q6a-efi /mnt/q6a-root
+          sudo losetup -d "$LOOP"
+
       - name: Prepare artifact
         run: |
           set -euo pipefail
